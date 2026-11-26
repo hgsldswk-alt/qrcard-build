@@ -1,0 +1,250 @@
+import XCTest
+
+final class FlowUITests: XCTestCase {
+    private let app = XCUIApplication()
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+    }
+
+    private func launch(_ arguments: [String] = [], language: String = "en",
+                        reset: Bool = true, env: [String: String] = [:]) {
+        app.terminate()
+        let locales = ["en": "en_US", "zh-Hans": "zh_CN", "zh-Hant": "zh_TW"]
+        app.launchArguments = ["-ui-testing", "-AppleLanguages", "(\(language))", "-AppleLocale",
+                               locales[language] ?? "en_US"] + (reset ? ["-reset"] : []) + arguments
+        app.launchEnvironment = env
+        app.launch()
+    }
+
+    private func button(_ id: String, wait: TimeInterval = 8) -> XCUIElement {
+        let element = app.buttons[id]
+        XCTAssertTrue(element.waitForExistence(timeout: wait), id)
+        return element
+    }
+
+    private func tap(_ id: String) {
+        let element = button(id)
+        if !element.isHittable { app.swipeUp() }
+        XCTAssertTrue(element.isHittable, id)
+        element.tap()
+    }
+
+    private func editable(_ id: String) -> XCUIElement {
+        let element = app.descendants(matching: .any).matching(identifier: id).firstMatch
+        XCTAssertTrue(element.waitForExistence(timeout: 6), id)
+        return element
+    }
+
+    private func type(_ value: String, in id: String) {
+        let field = editable(id)
+        field.tap()
+        field.typeText(value)
+    }
+
+    private func expectResult() {
+        let badge = app.descendants(matching: .any).matching(identifier: "result-saved").firstMatch
+        XCTAssertTrue(badge.waitForExistence(timeout: 12))
+        XCTAssertTrue(app.images["result-qr"].exists)
+    }
+
+    private func closeNativeShare() {
+        let appeared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            self.app.otherElements["native-share-sheet"].exists || self.app.otherElements["ActivityListView"].exists ||
+                self.app.buttons["Copy"].exists || self.app.buttons["AirDrop"].exists || self.app.cells["Save to Files"].exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [appeared], timeout: 12), .completed)
+        let close = app.buttons["Close"].firstMatch
+        if close.exists && close.isHittable {
+            close.tap()
+        } else {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.51)).press(
+                forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
+        }
+    }
+
+    func testCreateShareAndRelaunchOneTapShare() {
+        launch(env: ["QRC_TEST_LINK": "https://example.com/guide?q=1#top"])
+        XCTAssertTrue(app.staticTexts["history-empty"].exists)
+        tap("home-generate")
+        expectResult()
+        tap("result-share-png")
+        closeNativeShare()
+        XCTAssertTrue(button("result-back").exists)
+
+        launch(reset: false)
+        tap("recent-share-0")
+        closeNativeShare()
+        XCTAssertTrue(button("recent-card-0").exists)
+        XCTAssertFalse(app.staticTexts["result-saved"].exists)
+    }
+
+    func testInvalidLinkAndDraftsStaySeparate() {
+        launch(env: ["QRC_TEST_LINK": "missing-scheme.example"])
+        tap("home-generate")
+        XCTAssertTrue(app.staticTexts["form-error"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["history-empty"].exists)
+        tap("type-text")
+        type("Short note", in: "field-text")
+        tap("type-link")
+        XCTAssertEqual(editable("field-link").value as? String, "missing-scheme.example")
+        XCTAssertFalse(app.staticTexts["form-error"].exists)
+        tap("type-text")
+        XCTAssertEqual(editable("field-text").value as? String, "Short note")
+        tap("home-generate")
+        expectResult()
+        XCTAssertEqual(app.staticTexts["result-title"].label, "Short note")
+    }
+
+    func testWiFiPrivatePromotionAndCopy() {
+        launch(["-wifi"])
+        tap("home-generate")
+        expectResult()
+        XCTAssertTrue(app.staticTexts["result-kind"].label.contains("Wi-Fi"))
+        XCTAssertFalse(app.staticTexts["Studio Guest"].exists)
+        tap("result-promotion")
+        XCTAssertTrue(app.staticTexts["promotion-unavailable"].waitForExistence(timeout: 6))
+        XCTAssertFalse(app.switches["promotion-include"].exists)
+        XCTAssertFalse(app.images["promotion-content-qr"].exists)
+        XCTAssertFalse(app.staticTexts["Studio Guest"].exists)
+        XCTAssertFalse(button("promotion-share").isEnabled)
+        tap("sheet-close")
+        tap("result-copy")
+        XCTAssertEqual(editable("field-ssid").value as? String, "Studio Guest")
+        let open = app.switches["field-open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.tap()
+        XCTAssertFalse(app.secureTextFields["field-password"].exists)
+        tap("home-generate")
+        expectResult()
+    }
+
+    func testContactRequiresNameAndPhoneOrEmail() {
+        launch()
+        tap("type-contact")
+        tap("home-generate")
+        XCTAssertTrue(app.staticTexts["form-error"].waitForExistence(timeout: 8))
+        type("Demo Contact", in: "field-name")
+        type("demo@example.com", in: "field-email")
+        tap("home-generate")
+        expectResult()
+        XCTAssertEqual(app.staticTexts["result-title"].label, "Contact")
+        XCTAssertFalse(app.staticTexts["demo@example.com"].exists)
+    }
+
+    func testImportValidCodeChangesTypeWithoutCreatingCard() {
+        launch()
+        tap("home-more")
+        tap("more-import")
+        let body = Data(#"{"version":1,"kind":"text","layout":"standard"}"#.utf8)
+        type("QRC1:" + body.base64EncodedString(), in: "import-code")
+        tap("import-confirm")
+        XCTAssertTrue(app.staticTexts["import-notice"].waitForExistence(timeout: 6))
+        XCTAssertTrue(editable("field-text").exists)
+        XCTAssertTrue(app.staticTexts["history-empty"].exists)
+    }
+
+    func testHistorySearchThenRenameAndDelete() {
+        launch(["-seed"])
+        tap("home-history")
+        type("Studio Menu", in: "history-search")
+        XCTAssertFalse(app.buttons["history-card-1"].exists)
+        tap("history-card-0")
+        expectResult()
+        tap("result-rename")
+        // 改名框里已有原名，先删干净再输入（11-19 云端：直接打字变成「Studio MenuMenu」）
+        let title = editable("rename-title")
+        title.tap()
+        let old = (title.value as? String) ?? ""
+        title.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count + 2) + "Menu")
+        tap("rename-save")
+        XCTAssertTrue(app.staticTexts.matching(identifier: "result-title").matching(
+            NSPredicate(format: "label == %@", "Menu")).firstMatch.waitForExistence(timeout: 6))
+        tap("result-delete")
+        // 系统 alert 里按钮的标识带不过去（11-19 云端）：点弹窗里第一个非「取消」的按钮
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 6))
+        let destroy = alert.buttons.matching(NSPredicate(format: "NOT (label IN %@)", ["取消", "Cancel"])).firstMatch
+        XCTAssertTrue(destroy.waitForExistence(timeout: 4))
+        destroy.tap()
+        XCTAssertTrue(button("recent-card-0").label.contains("Guest Wi-Fi"))
+        XCTAssertFalse(app.buttons["recent-card-1"].exists)
+    }
+
+    func testPublicPromotionRequiresOptIn() {
+        launch(env: ["QRC_TEST_TEXT": "First line\nSecond line"])
+        tap("home-generate")
+        expectResult()
+        tap("result-promotion")
+        XCTAssertFalse(app.images["promotion-content-qr"].exists)
+        let toggle = app.switches["promotion-include"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 6))
+        toggle.tap()
+        XCTAssertTrue(app.images["promotion-content-qr"].waitForExistence(timeout: 6))
+    }
+
+    func testSavedCardExportsAndPreviewsPrintPDF() {
+        launch(["-seed"])
+        tap("recent-card-0")
+        expectResult()
+        tap("result-exports")
+        tap("exports-print")
+        closeNativeShare()
+        tap("exports-print-preview")
+        XCTAssertTrue(app.images["print-preview"].waitForExistence(timeout: 8))
+        tap("print-share")
+        closeNativeShare()
+    }
+
+    func testMilestoneOfferedAfterTenthDistinctCard() {
+        launch(["-milestone"], env: ["QRC_TEST_TEXT": "One new card"])
+        tap("home-generate")
+        expectResult()
+        tap("milestone-open")
+        XCTAssertTrue(app.staticTexts["Made 10 QR codes"].waitForExistence(timeout: 6))
+        XCTAssertFalse(app.switches["promotion-include"].exists)
+        tap("sheet-close")
+        XCTAssertFalse(app.buttons["milestone-open"].exists)
+    }
+
+    func testStoreShotsEnglish() throws { try storeShots("en") }
+    func testStoreShotsSimplifiedChinese() throws { try storeShots("zh-Hans") }
+    func testStoreShotsTraditionalChinese() throws { try storeShots("zh-Hant") }
+
+    private func storeShots(_ language: String) throws {
+        launch(["-seed"], language: language, env: ["QRC_TEST_LINK": "https://example.com/guide?event=studio"])
+        _ = button("recent-share-1")
+        try shot("store-\(language)-01-create")
+        tap("home-generate")
+        expectResult()
+        try shot("store-\(language)-02-result")
+        tap("result-exports")
+        tap("exports-print-preview")
+        XCTAssertTrue(app.images["print-preview"].waitForExistence(timeout: 8))
+        try shot("store-\(language)-05-print")
+
+        launch(["-wifi"], language: language)
+        tap("home-generate")
+        expectResult()
+        try shot("store-\(language)-03-wifi")
+
+        launch(["-seed"], language: language)
+        _ = button("recent-share-1")
+        try shot("store-\(language)-04-reuse")
+    }
+
+    private func shot(_ name: String) throws {
+        let image = app.screenshot()
+        let attachment = XCTAttachment(screenshot: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        if let path = ProcessInfo.processInfo.environment["SHOTS_DIR"] ??
+            ProcessInfo.processInfo.environment["TEST_RUNNER_SHOTS_DIR"] {
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? image.pngRepresentation.write(to: directory.appendingPathComponent(name + ".png"), options: .atomic)
+        }
+    }
+}
